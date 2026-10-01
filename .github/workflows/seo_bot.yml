@@ -2,13 +2,61 @@ name: BlackBiz SEO Bot
 
 on:
   schedule:
-    - cron: "0 6 * * *"    # 09:00 МСК
-    - cron: "0 13 * * *"   # 16:00 МСК
-    - cron: "0 19 * * *"   # 22:00 МСК
-  workflow_dispatch:        # ручной запуск
+    - cron: "0 * * * *" # Проверка каждый час; запуск бота решает случайное расписание
+  workflow_dispatch: # Ручной запуск
+
+permissions:
+  contents: write
 
 jobs:
+  schedule_check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+
+    steps:
+      - name: Choose today's random Moscow hours
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            echo "Ручной запуск: бот будет запущен."
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import hashlib
+          import os
+
+          now = datetime.now(ZoneInfo("Europe/Moscow"))
+          date_key = now.date().isoformat()
+
+          # Четыре разных часа, стабильно выбранных для этой даты.
+          hours = set()
+          counter = 0
+          while len(hours) < 4:
+              digest = hashlib.sha256(f"{date_key}:{counter}".encode()).digest()
+              hours.add(int.from_bytes(digest[:4], "big") % 24)
+              counter += 1
+
+          selected_hours = sorted(hours)
+          should_run = now.hour in hours
+
+          print(f"Время МСК: {now:%Y-%m-%d %H:%M}")
+          print(f"Часы запуска сегодня: {', '.join(f'{hour:02d}:00' for hour in selected_hours)}")
+          print(f"Запускать бота сейчас: {should_run}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"should_run={'true' if should_run else 'false'}\n")
+          PY
+
   publish:
+    needs: schedule_check
+    if: needs.schedule_check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -37,7 +85,7 @@ jobs:
 
       - name: Commit counter + links
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           touch links.txt counter.txt
           git add counter.txt links.txt
