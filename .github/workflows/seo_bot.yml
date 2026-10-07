@@ -1,0 +1,85 @@
+name: BlackBiz SEO Bot
+
+on:
+  # Проверяем каждые 15 минут: если слот задержался или публикация упала,
+  # следующий запуск попробует снова. Слоты: 09:00, 15:00, 21:00 МСК.
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: blackbiz-seo-bot
+  cancel-in-progress: false
+
+jobs:
+  schedule_check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.decide.outputs.should_run }}
+      slot_id: ${{ steps.decide.outputs.slot_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Find activation time
+        id: activation
+        run: echo "at=$(git log -1 --format=%cI -- .github/workflows/seo_bot.yml)" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether a post is due
+        id: decide
+        env:
+          SCHEDULE_START_AT: ${{ steps.activation.outputs.at }}
+        run: python schedule_check.py
+
+  publish:
+    needs: schedule_check
+    if: needs.schedule_check.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate and publish
+        env:
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          IMGBB_KEY: ${{ secrets.IMGBB_KEY }}
+          BOT_SLOT_ID: ${{ needs.schedule_check.outputs.slot_id }}
+        run: python main.py
+
+      # Runs only after successful publication. A failed post remains due and
+      # will be retried by the next 15-minute schedule check.
+      - name: Commit publication state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add counter.txt links.txt
+          if git diff --cached --quiet; then
+            echo "No publication state changes to commit."
+            exit 0
+          fi
+          git commit -m "bot: публикация [skip ci]"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
